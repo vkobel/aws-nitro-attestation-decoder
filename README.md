@@ -27,7 +27,7 @@ uv run decode_attestation.py
 uv run decode_attestation.py --verify
 
 # Different file
-uv run decode_attestation.py --attestation attestation-tkcom
+uv run decode_attestation.py --attestation attestation
 
 # Full document structure
 uv run decode_attestation.py --full --verify
