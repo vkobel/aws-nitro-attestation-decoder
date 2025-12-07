@@ -27,7 +27,7 @@ uv run decode_attestation.py
 uv run decode_attestation.py --verify
 
 # Different file
-uv run decode_attestation.py --attestation attestation
+uv run decode_attestation.py --attestation attestation_in_base64
 
 # Full document structure
 uv run decode_attestation.py --full --verify
