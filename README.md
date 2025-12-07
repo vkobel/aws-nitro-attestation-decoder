@@ -13,7 +13,7 @@ Decode and verify AWS Nitro Enclave attestation documents.
 ## Quick Start
 
 ```bash
-uv add cbor2 cryptography
+uv sync
 uv run decode_attestation.py
 ```
 
