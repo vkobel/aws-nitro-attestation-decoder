@@ -4,6 +4,7 @@ import json
 import base64
 import cbor2
 import argparse
+from datetime import datetime, timezone
 from pprint import pprint
 from cryptography import x509
 from cryptography.hazmat.primitives import hashes
@@ -123,6 +124,64 @@ def filter_nonzero_pcrs(pcrs):
     elif isinstance(pcrs, list):
         return [(i, pcr) for i, pcr in enumerate(pcrs) if pcr and not is_zero_filled(pcr)]
     return []
+
+def format_datetime(dt):
+    """Format datetime for display"""
+    return dt.strftime('%Y-%m-%d %H:%M:%S UTC')
+
+def get_certificate_info(cert_der):
+    """Extract certificate information including expiry dates"""
+    cert = x509.load_der_x509_certificate(cert_der, default_backend())
+
+    # Get validity dates
+    not_before = cert.not_valid_before_utc
+    not_after = cert.not_valid_after_utc
+    now = datetime.now(timezone.utc)
+
+    # Calculate days until expiry
+    days_until_expiry = (not_after - now).days
+
+    # Determine status
+    if now < not_before:
+        status = "⚠️  NOT YET VALID"
+        status_detail = f"Valid from {format_datetime(not_before)}"
+    elif now > not_after:
+        status = "✗ EXPIRED"
+        status_detail = f"Expired {abs(days_until_expiry)} days ago"
+    elif days_until_expiry < 30:
+        status = "⚠️  EXPIRING SOON"
+        status_detail = f"Expires in {days_until_expiry} days"
+    else:
+        status = "✓ VALID"
+        status_detail = f"Expires in {days_until_expiry} days"
+
+    # Extract CN from subject and issuer for display
+    subject_cn = None
+    issuer_cn = None
+
+    for attr in cert.subject:
+        if attr.oid == x509.oid.NameOID.COMMON_NAME:
+            subject_cn = attr.value
+            break
+
+    for attr in cert.issuer:
+        if attr.oid == x509.oid.NameOID.COMMON_NAME:
+            issuer_cn = attr.value
+            break
+
+    return {
+        'cert': cert,
+        'not_before': not_before,
+        'not_after': not_after,
+        'days_until_expiry': days_until_expiry,
+        'status': status,
+        'status_detail': status_detail,
+        'subject': cert.subject.rfc4514_string(),
+        'subject_cn': subject_cn,
+        'issuer': cert.issuer.rfc4514_string(),
+        'issuer_cn': issuer_cn,
+        'is_self_signed': cert.subject == cert.issuer
+    }
 
 def verify_certificate_chain(cert_chain, root_cert_pem):
     """Verify the certificate chain up to the root certificate
@@ -261,27 +320,42 @@ def verify_cose_signature(cose_structure, payload, root_cert_pem):
 
 def display_cose_structure(cose):
     """Display COSE Sign1 structure information"""
-    print("\n[COSE Sign1 Structure]")
-    print("-" * SEPARATOR_WIDTH)
-    print(f"Algorithm: {cose['protected_headers']}")
-    print(f"Signature length: {len(cose['signature'])} bytes")
+    print("\n" + "=" * SEPARATOR_WIDTH)
+    print("COSE SIGN1 STRUCTURE")
+    print("=" * SEPARATOR_WIDTH)
+    print(f"\nProtected Headers: {cose['protected_headers']}")
+    print(f"Signature Length: {len(cose['signature'])} bytes")
 
 def display_key_information(doc, cose):
     """Display key attestation document information"""
     print("\n" + "=" * SEPARATOR_WIDTH)
-    print("KEY INFORMATION")
+    print("ATTESTATION DOCUMENT")
     print("=" * SEPARATOR_WIDTH)
+
+    # Certificate Information
+    if 'certificate' in doc:
+        cert_info = get_certificate_info(doc['certificate'])
+        print("\nCertificate Status:")
+        print(f"  {cert_info['status']} - {cert_info['status_detail']}")
+        print(f"  Valid From:  {format_datetime(cert_info['not_before'])}")
+        print(f"  Valid Until: {format_datetime(cert_info['not_after'])}")
+        if cert_info['subject_cn']:
+            print(f"  Subject CN:  {cert_info['subject_cn']}")
 
     if 'module_id' in doc:
         print(f"\nModule ID: {doc['module_id']}")
 
     if 'timestamp' in doc:
-        print(f"Timestamp: {doc['timestamp']}")
+        ts = doc['timestamp']
+        if isinstance(ts, int):
+            dt = datetime.fromtimestamp(ts / 1000, tz=timezone.utc)
+            print(f"Timestamp: {ts} ({format_datetime(dt)})")
+        else:
+            print(f"Timestamp: {ts}")
 
     if 'digest' in doc:
         print(f"Digest: {doc['digest']}")
 
-    # Always show signature in full
     if cose:
         print(f"\nSignature ({len(cose['signature'])} bytes):")
         print(cose['signature'].hex())
@@ -291,17 +365,16 @@ def display_key_information(doc, cose):
         non_zero_pcrs = filter_nonzero_pcrs(pcrs)
 
         if isinstance(non_zero_pcrs, dict):
-            print(f"\nPCR Values ({len(non_zero_pcrs)} non-zero registers out of {len(pcrs)}):")
+            print(f"\nPCR Values ({len(non_zero_pcrs)} non-zero out of {len(pcrs)}):")
             for idx in sorted(non_zero_pcrs.keys()):
                 pcr = non_zero_pcrs[idx]
                 print(f"  PCR[{idx}]: {pcr if isinstance(pcr, str) else pcr.hex()}")
         elif isinstance(non_zero_pcrs, list):
             total_pcrs = len(pcrs) if isinstance(pcrs, list) else 0
-            print(f"\nPCR Values ({len(non_zero_pcrs)} non-zero registers out of {total_pcrs}):")
+            print(f"\nPCR Values ({len(non_zero_pcrs)} non-zero out of {total_pcrs}):")
             for i, pcr in non_zero_pcrs:
                 print(f"  PCR[{i}]: {pcr.hex() if isinstance(pcr, bytes) else pcr}")
 
-    # Always show public key in full
     if 'public_key' in doc:
         pk = doc['public_key']
         if isinstance(pk, bytes):
@@ -318,8 +391,7 @@ def display_key_information(doc, cose):
         except (UnicodeDecodeError, AttributeError):
             ud = doc['user_data']
             if isinstance(ud, bytes):
-                print(f"  (binary data, {len(ud)} bytes)")
-                print(f"  Hex: {ud.hex()}")
+                print(f"  Binary ({len(ud)} bytes): {ud.hex()}")
             else:
                 print(f"  {ud}")
 
@@ -343,9 +415,9 @@ def run_verification(doc, cose, payload_bytes, args):
 
     # Verify COSE signature
     sig_valid, sig_msg = verify_cose_signature(cose, payload_bytes, root_cert_pem)
-    print(f"\n[1] COSE Signature Verification:")
-    print(f"    Status: {'✓ VALID' if sig_valid else '✗ INVALID'}")
-    print(f"    Details: {sig_msg}")
+    print(f"\n[1] COSE Signature Verification")
+    print(f"  Status:  {'✓ VALID' if sig_valid else '✗ INVALID'}")
+    print(f"  Details: {sig_msg}")
 
     # Verify certificate chain
     chain_valid = False
@@ -353,22 +425,54 @@ def run_verification(doc, cose, payload_bytes, args):
         # Build the full chain: [enclave cert, ca bundle certs...]
         cert_chain = [doc['certificate']] + doc['cabundle']
         chain_valid, chain_msg = verify_certificate_chain(cert_chain, root_cert_pem)
-        print(f"\n[2] Certificate Chain Verification:")
-        print(f"    Status: {'✓ VALID' if chain_valid else '✗ INVALID'}")
-        print(f"    Details: {chain_msg}")
-        print(f"    Chain: Enclave → Instance → Zonal → Regional → Root ({len(cert_chain)} certs)")
+        print(f"\n[2] Certificate Chain Verification")
+        print(f"  Status:  {'✓ VALID' if chain_valid else '✗ INVALID'}")
+        print(f"  Details: {chain_msg}")
+        print(f"  Chain Length: {len(cert_chain)} certificates")
+
+        # Show certificate details for each cert in the chain
+        print(f"\n  Certificate Chain Details:")
+        expired_count = 0
+        for i, cert_der in enumerate(cert_chain):
+            cert_info = get_certificate_info(cert_der)
+
+            # Count expired certificates
+            if '✗ EXPIRED' in cert_info['status']:
+                expired_count += 1
+
+            # Determine cert type based on self-signed status and position
+            if cert_info['is_self_signed']:
+                cert_type = "Root CA"
+            elif i == 0:
+                cert_type = "Enclave Cert"
+            else:
+                cert_type = "Intermediate CA"
+
+            print(f"\n    [{i}] {cert_type}")
+            if cert_info['subject_cn']:
+                print(f"      Subject CN:  {cert_info['subject_cn']}")
+            if cert_info['issuer_cn']:
+                print(f"      Issuer CN:   {cert_info['issuer_cn']}")
+            print(f"      Status:      {cert_info['status']}")
+            print(f"      Valid From:  {format_datetime(cert_info['not_before'])}")
+            print(f"      Valid Until: {format_datetime(cert_info['not_after'])}")
+            print(f"      {cert_info['status_detail']}")
+
+        if expired_count > 0:
+            print(f"\n  ⚠️  WARNING: {expired_count} certificate(s) in chain are expired!")
+            print(f"     Note: Signature verification checks cryptographic validity, not expiry dates.")
     else:
-        print(f"\n[2] Certificate Chain Verification:")
-        print(f"    Status: ⊘ SKIPPED")
-        print(f"    Details: Certificates not found in attestation")
+        print(f"\n[2] Certificate Chain Verification")
+        print(f"  Status:  ⊘ SKIPPED")
+        print(f"  Details: Certificates not found in attestation")
 
     # Overall result
     print("\n" + "=" * SEPARATOR_WIDTH)
     overall_valid = sig_valid and (chain_valid if 'cabundle' in doc else True)
     if overall_valid:
-        print("║  OVERALL RESULT: ✓ ATTESTATION VERIFIED SUCCESSFULLY  ║")
+        print("OVERALL: ✓ ATTESTATION VERIFIED SUCCESSFULLY")
     else:
-        print("║  OVERALL RESULT: ✗ ATTESTATION VERIFICATION FAILED    ║")
+        print("OVERALL: ✗ ATTESTATION VERIFICATION FAILED")
     print("=" * SEPARATOR_WIDTH)
 
 if __name__ == '__main__':
@@ -379,8 +483,12 @@ if __name__ == '__main__':
     parser.add_argument('--full', action='store_true', help='Show full public key and signature')
     args = parser.parse_args()
 
-    print("Decoding AWS Nitro attestation document...")
+    print("\n" + "=" * SEPARATOR_WIDTH)
+    print("AWS NITRO ATTESTATION DECODER")
     print("=" * SEPARATOR_WIDTH)
+    print(f"Attestation file: {args.attestation}")
+    if args.verify:
+        print(f"Root certificate: {args.root_cert}")
 
     # Decode the attestation document
     result = decode_attestation(args.attestation)
