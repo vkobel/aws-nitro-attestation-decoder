@@ -20,6 +20,12 @@ ES384_R_S_LENGTH = 48
 # Display constants
 SEPARATOR_WIDTH = 60
 
+# ANSI color codes
+COLOR_GREEN = '\033[92m'
+COLOR_YELLOW = '\033[93m'
+COLOR_RED = '\033[91m'
+COLOR_RESET = '\033[0m'
+
 def read_attestation_file(filepath):
     """Read attestation from JSON or raw base64 file
 
@@ -129,6 +135,32 @@ def format_datetime(dt):
     """Format datetime for display"""
     return dt.strftime('%Y-%m-%d %H:%M:%S UTC')
 
+def format_time_remaining(timedelta_obj):
+    """Format time remaining with granular detail for < 3 days"""
+    total_seconds = abs(timedelta_obj.total_seconds())
+    days = int(total_seconds // 86400)
+    hours = int((total_seconds % 86400) // 3600)
+    minutes = int((total_seconds % 3600) // 60)
+
+    if abs(days) >= 3:
+        # Show days only for >= 3 days
+        return f"{days} {'day' if days == 1 else 'days'}"
+    elif days > 0:
+        # Show days and hours for 1-2 days
+        if hours > 0:
+            return f"{days} {'day' if days == 1 else 'days'} {hours} {'hour' if hours == 1 else 'hours'}"
+        else:
+            return f"{days} {'day' if days == 1 else 'days'}"
+    elif hours > 0:
+        # Show hours and minutes for < 1 day
+        if minutes > 0:
+            return f"{hours} {'hour' if hours == 1 else 'hours'} {minutes} {'minute' if minutes == 1 else 'minutes'}"
+        else:
+            return f"{hours} {'hour' if hours == 1 else 'hours'}"
+    else:
+        # Show minutes only for < 1 hour
+        return f"{minutes} {'minute' if minutes == 1 else 'minutes'}"
+
 def get_certificate_info(cert_der):
     """Extract certificate information including expiry dates"""
     cert = x509.load_der_x509_certificate(cert_der, default_backend())
@@ -138,22 +170,26 @@ def get_certificate_info(cert_der):
     not_after = cert.not_valid_after_utc
     now = datetime.now(timezone.utc)
 
-    # Calculate days until expiry
-    days_until_expiry = (not_after - now).days
+    # Calculate time until expiry
+    time_until_expiry = not_after - now
+    days_until_expiry = time_until_expiry.days
 
-    # Determine status
+    # Determine status with colored text
     if now < not_before:
-        status = "⚠️  NOT YET VALID"
+        status = f"{COLOR_YELLOW}NOT YET VALID{COLOR_RESET}"
         status_detail = f"Valid from {format_datetime(not_before)}"
     elif now > not_after:
-        status = "✗ EXPIRED"
-        status_detail = f"Expired {abs(days_until_expiry)} days ago"
+        status = f"{COLOR_RED}EXPIRED{COLOR_RESET}"
+        time_str = format_time_remaining(time_until_expiry)
+        status_detail = f"Expired {time_str} ago"
     elif days_until_expiry < 30:
-        status = "⚠️  EXPIRING SOON"
-        status_detail = f"Expires in {days_until_expiry} days"
+        status = f"{COLOR_YELLOW}EXPIRING SOON{COLOR_RESET}"
+        time_str = format_time_remaining(time_until_expiry)
+        status_detail = f"Expires in {time_str}"
     else:
-        status = "✓ VALID"
-        status_detail = f"Expires in {days_until_expiry} days"
+        status = f"{COLOR_GREEN}VALID{COLOR_RESET}"
+        time_str = format_time_remaining(time_until_expiry)
+        status_detail = f"Expires in {time_str}"
 
     # Extract CN from subject and issuer for display
     subject_cn = None
@@ -410,13 +446,14 @@ def run_verification(doc, cose, payload_bytes, args):
         with open(args.root_cert, 'r') as f:
             root_cert_pem = f.read()
     except FileNotFoundError:
-        print(f"\n✗ ERROR: Root certificate not found at {args.root_cert}")
+        print(f"\n{COLOR_RED}ERROR:{COLOR_RESET} Root certificate not found at {args.root_cert}")
         exit(1)
 
     # Verify COSE signature
     sig_valid, sig_msg = verify_cose_signature(cose, payload_bytes, root_cert_pem)
     print(f"\n[1] COSE Signature Verification")
-    print(f"  Status:  {'✓ VALID' if sig_valid else '✗ INVALID'}")
+    sig_status = f"{COLOR_GREEN}VALID{COLOR_RESET}" if sig_valid else f"{COLOR_RED}INVALID{COLOR_RESET}"
+    print(f"  Status:  {sig_status}")
     print(f"  Details: {sig_msg}")
 
     # Verify certificate chain
@@ -426,7 +463,8 @@ def run_verification(doc, cose, payload_bytes, args):
         cert_chain = [doc['certificate']] + doc['cabundle']
         chain_valid, chain_msg = verify_certificate_chain(cert_chain, root_cert_pem)
         print(f"\n[2] Certificate Chain Verification")
-        print(f"  Status:  {'✓ VALID' if chain_valid else '✗ INVALID'}")
+        chain_status = f"{COLOR_GREEN}VALID{COLOR_RESET}" if chain_valid else f"{COLOR_RED}INVALID{COLOR_RESET}"
+        print(f"  Status:  {chain_status}")
         print(f"  Details: {chain_msg}")
         print(f"  Chain Length: {len(cert_chain)} certificates")
 
@@ -437,7 +475,7 @@ def run_verification(doc, cose, payload_bytes, args):
             cert_info = get_certificate_info(cert_der)
 
             # Count expired certificates
-            if '✗ EXPIRED' in cert_info['status']:
+            if 'EXPIRED' in cert_info['status']:
                 expired_count += 1
 
             # Determine cert type based on self-signed status and position
@@ -459,7 +497,7 @@ def run_verification(doc, cose, payload_bytes, args):
             print(f"      {cert_info['status_detail']}")
 
         if expired_count > 0:
-            print(f"\n  ⚠️  WARNING: {expired_count} certificate(s) in chain are expired!")
+            print(f"\n  {COLOR_YELLOW}WARNING:{COLOR_RESET} {expired_count} certificate(s) in chain are expired!")
             print(f"     Note: Signature verification checks cryptographic validity, not expiry dates.")
     else:
         print(f"\n[2] Certificate Chain Verification")
@@ -470,15 +508,15 @@ def run_verification(doc, cose, payload_bytes, args):
     print("\n" + "=" * SEPARATOR_WIDTH)
     overall_valid = sig_valid and (chain_valid if 'cabundle' in doc else True)
     if overall_valid:
-        print("OVERALL: ✓ ATTESTATION VERIFIED SUCCESSFULLY")
+        print(f"OVERALL: {COLOR_GREEN}ATTESTATION VERIFIED SUCCESSFULLY{COLOR_RESET}")
     else:
-        print("OVERALL: ✗ ATTESTATION VERIFICATION FAILED")
+        print(f"OVERALL: {COLOR_RED}ATTESTATION VERIFICATION FAILED{COLOR_RESET}")
     print("=" * SEPARATOR_WIDTH)
 
 if __name__ == '__main__':
     parser = argparse.ArgumentParser(description='Decode and verify AWS Nitro attestation documents')
     parser.add_argument('--attestation', default='attestation', help='Path to attestation file (default: attestation)')
-    parser.add_argument('--verify', action='store_true', help='Verify the attestation signature and certificate chain')
+    parser.add_argument('--no-verify', action='store_true', help='Skip attestation signature and certificate chain verification')
     parser.add_argument('--root-cert', default='root.pem', help='Path to AWS root certificate (default: root.pem)')
     parser.add_argument('--full', action='store_true', help='Show full public key and signature')
     args = parser.parse_args()
@@ -487,8 +525,10 @@ if __name__ == '__main__':
     print("AWS NITRO ATTESTATION DECODER")
     print("=" * SEPARATOR_WIDTH)
     print(f"Attestation file: {args.attestation}")
-    if args.verify:
+    if not args.no_verify:
         print(f"Root certificate: {args.root_cert}")
+    else:
+        print("Verification: SKIPPED (--no-verify flag)")
 
     # Decode the attestation document
     result = decode_attestation(args.attestation)
@@ -517,6 +557,6 @@ if __name__ == '__main__':
     else:
         print(f"\n(Attestation document is a {type(doc).__name__}, not a dict)")
 
-    # Run verification if requested
-    if args.verify and cose and payload_bytes:
+    # Run verification by default (unless --no-verify is specified)
+    if not args.no_verify and cose and payload_bytes:
         run_verification(doc, cose, payload_bytes, args)
